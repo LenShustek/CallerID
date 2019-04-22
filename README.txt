@@ -18,12 +18,13 @@
    (In the code we call the non-volatile memory EEPROM, but it's implemented as
    one block of the FLASH memory that is written all at once.)
 
-   There are several strings of configuration information to set up:
+   There are several pieces of configuration information to set up:
      - the SSID of the WiFi network
      - the password for the WiFi network
-     - the names to be displayed for phone lines 1 through 8
+     - the names to be displayed for lines 1 through 8
+     - whether the backlight should be turned off when idle
 
-   The configuration strings are requested if they have never been set, or
+   The configuration information is requested if it has never been set, or
    if both buttons are pushed at the same time and then released.
 
    The configuration strings can be set, painfully, using the two pushbuttons.

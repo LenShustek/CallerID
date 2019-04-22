@@ -20,12 +20,13 @@
    (In the code we call the non-volatile memory EEPROM, but it's implemented as
    one block of the FLASH memory that is written all at once.)
 
-   There are several strings of configuration information to set up:
+   There are several pieces of configuration information to set up:
      - the SSID of the WiFi network
      - the password for the WiFi network
      - the names to be displayed for lines 1 through 8
+     - whether the backlight should be turned off when idle
 
-   The configuration strings are requested if they have never been set, or
+   The configuration information is requested if it has never been set, or
    if both buttons are pushed at the same time and then released.
 
    The configuration strings can be set, painfully, using the two pushbuttons.
@@ -38,12 +39,12 @@
         (For PuTTY on Windows: choose a "Serial" connection line like "COM27"
      - type each name asked for, with "Enter" signaling done. Backspace works.
 
-   The packet format is not thoroughly documented by Whozz Calling, so there may be 
+   The packet format is not thoroughly documented by Whozz Calling, so there may be
    some I don't understand that generate a "bad packet" message. Pushing both
    buttons for more than three seconds and then releasing will display the contents
    of the last such puzzling packet so we can add a decode for it.
-   
-   
+
+
    ------------------------------------------------------------------------------------------------
    Copyright (c) 2019, Len Shustek
      The MIT License (MIT)
@@ -69,19 +70,22 @@
    16 Apr 2019, V1.1, L. Shustek
       allow serial port to supply config info
       add diagnostic mode to show last bad packet
+   21 Apr 2019, V1.2, L. Shustek
+      add a mode to turn off backlight after a few seconds
 
 
    Programmers beware: the Feather ESP8266 has a watchdog timer that reboots the machine
    after a while (100 msec?), so every tight loop has to incorporate a call to yield().
 
  ************************************************************************************************/
-#define VERSION "1.1"
+#define VERSION "1.2"
 
 #define TESTCALLS_GOOD false     // generate some good fake calls for testing?
 #define TESTCALLS_BAD false      // generate some fake bad calls for testing?
 
 #define UDP_PORT 3520  // Whozz Calling box parameters
 #define MAX_LINES 8
+#define BACKLIGHT_TIMEOUT_SECS 10
 
 #include <Arduino.h>
 #include <LiquidCrystal.h>
@@ -92,6 +96,7 @@
 // Feather pin assignments
 #define UP_SWITCH 4
 #define DN_SWITCH 5
+#define BACKLIGHT 16
 LiquidCrystal lcd(0, 2, 12, 13, 14, 15); // RS, E, D4, D5, D6, D7
 
 #define MAX_CALLS 200       // number of call records we save in RAM
@@ -112,6 +117,8 @@ WiFiUDP udp;
 char packet[MAX_PACKET];
 char *pktptr;
 int pktlen;
+unsigned long backlight_turnon_time;
+bool backlight_on;
 
 // these arrays for fields that we parse from the packet are all
 // one byte larger because they are 0-terminated as C strings
@@ -169,13 +176,26 @@ void long_message(byte row, const char *msg) { // print a string multiple lines 
       lcd.print(msg[i]);
       if (i % 20 == 19) lcd.setCursor(0, ++row); } }
 
+void turn_on_backlight(void) {
+   digitalWrite(BACKLIGHT, HIGH);
+   backlight_on = true;
+   backlight_turnon_time = millis(); }
+
+void turn_off_backlight(void) {
+   digitalWrite(BACKLIGHT, LOW);
+   backlight_on = false; }
+
 //******* routines for managing the non-volatile memory
 
 // In addition to configuration information, we store the most recent calls in
 // non-volatile FLASH memory so that they are preserved across power loss in the box.
 
 struct eeprom_hdr_t {  // the header at the start of non-volatile memory
-   char id[8];                        // null-terminated "Callers" to mark validity
+   char id[8];                        // null-terminated 7-character ID string to mark validity
+#define ID_STRING "Calllog"
+   byte options;                        // various options
+#define OPT_BACKLIGHT_OFF 0x01
+   byte reserved[3];
    char ssid[WIFI_NAMELENGTH + 1];    // null-terminated WiFi SSID
    char password[WIFI_NAMELENGTH + 1];// null-terminated WiFi password
    char line_names[MAX_LINES][LINE_NAMELENGTH + 1]; // null-terminated line names
@@ -195,11 +215,11 @@ void eeprom_read(int addr, int length, byte *dstptr) {
 
 void eeprom_load(void) {  // on startup, load calls saved in the FLASH memory archive
    eeprom_read(0, sizeof(struct eeprom_hdr_t), (byte *)&eeprom_hdr); // read the header
-   if (memcmp(eeprom_hdr.id, "Callers", 8) != 0 // if FLASH isn't initialized,
+   if (memcmp(eeprom_hdr.id, ID_STRING, 8) != 0 // if FLASH isn't initialized,
          || digitalRead(DN_SWITCH) == 0 // or if a button is pressed during power up
          || digitalRead(UP_SWITCH) == 0) { //*** initialize FLASH memory
       memset(&eeprom_hdr, 0, sizeof(struct eeprom_hdr_t));
-      strcpy(eeprom_hdr.id, "Callers");
+      strcpy(eeprom_hdr.id, ID_STRING);
       for (int i = 0; i < MAX_LINES; ++i)
          sprintf(eeprom_hdr.line_names[i], "line %d", i + 1);
       eeprom_write(0, sizeof(struct eeprom_hdr_t), (byte *)&eeprom_hdr);
@@ -318,7 +338,9 @@ bool double_button_push = false;
 unsigned long switch_pushed_time;
 
 bool switch_push (int pin) { // true when button pushed and released
+   yield();
    if (digitalRead(pin) == 0) {
+      turn_on_backlight();
       delay(DEBOUNCE);
       unsigned long startpush = millis();
       while (digitalRead(pin) == 0) {
@@ -419,12 +441,24 @@ done:
    Serial.print(title); Serial.print(":");
    Serial.print(dst); Serial.print("\r\n"); }
 
+// ask a yes/no question, up to two lines long
+bool ask_yesno(const char *question) {
+   lcd.clear(); long_message(1, question);
+   lcd.setCursor(0, 0); lcd.print("yes");
+   lcd.setCursor(0, 3); lcd.print("no");
+   while (true)
+      if (switch_push(UP_SWITCH)) return true;
+      else if (switch_push(DN_SWITCH)) return false; }
+
 void do_configuration(void) { // ask for (or read from the serial port) the configuration information
    input_string("WiFi network", eeprom_hdr.ssid, WIFI_NAMELENGTH);
    input_string("WiFi password", eeprom_hdr.password, WIFI_NAMELENGTH);
    for (int i = 0; i < MAX_LINES; ++i) {
       sprintf(string, "Line %d name", i + 1);
       input_string(string, eeprom_hdr.line_names[i], LINE_NAMELENGTH); }
+   if (ask_yesno("Turn backlight off  when idle?"))
+      eeprom_hdr.options |= OPT_BACKLIGHT_OFF;
+   else eeprom_hdr.options &= ~OPT_BACKLIGHT_OFF;
    eeprom_write(0, sizeof(struct eeprom_hdr_t), (byte *)&eeprom_hdr);
    EEPROM.commit(); // write the header to FLASH
    lcd.clear(); center_message(0, "Names recorded");
@@ -557,6 +591,8 @@ void setup(void) {
    delay(1000);
    pinMode(UP_SWITCH, INPUT_PULLUP);
    pinMode(DN_SWITCH, INPUT_PULLUP);
+   pinMode(BACKLIGHT, OUTPUT);
+   turn_on_backlight();
    EEPROM.begin(EEPROM_SIZE);
    eeprom_load();
    Serial.begin(9600);
@@ -575,6 +611,7 @@ void loop(void) {
       join_network();
 
    if (pktlen = read_packet()) {
+      turn_on_backlight();
       pktptr = packet;
 
       if (pktlen < 52
@@ -619,6 +656,11 @@ void loop(void) {
 
       else {
          //**** a packet we don't handle
-         badpacket(2); } } }
+         badpacket(2); } }
+
+   if (eeprom_hdr.options & OPT_BACKLIGHT_OFF
+         && backlight_on
+         && millis() - backlight_turnon_time > BACKLIGHT_TIMEOUT_SECS * 1000)
+      turn_off_backlight(); }
 //*
 
