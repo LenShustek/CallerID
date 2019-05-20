@@ -72,20 +72,25 @@
       add diagnostic mode to show last bad packet
    21 Apr 2019, V1.2, L. Shustek
       add a mode to turn off backlight after a few seconds
-
+   20 May 2019, V1.3, L. Shustek
+      make scroll buttons work on push, not release, and implement auto-repeat
 
    Programmers beware: the Feather ESP8266 has a watchdog timer that reboots the machine
    after a while (100 msec?), so every tight loop has to incorporate a call to yield().
 
  ************************************************************************************************/
-#define VERSION "1.2"
+#define VERSION "1.3"
 
 #define TESTCALLS_GOOD false     // generate some good fake calls for testing?
 #define TESTCALLS_BAD false      // generate some fake bad calls for testing?
 
 #define UDP_PORT 3520  // Whozz Calling box parameters
 #define MAX_LINES 8
+
 #define BACKLIGHT_TIMEOUT_SECS 10
+#define AUTOREPEAT_DELAY_MSEC 1000
+#define AUTOREPEAT_PERIOD_MSEC 250
+#define LONGPUSH_MSEC 3000
 
 #include <Arduino.h>
 #include <LiquidCrystal.h>
@@ -334,21 +339,13 @@ void update_duration(void) { // update the duration of a call alcready stored
 
 //******* routines for processing the buttons
 
-bool double_button_push = false;
-unsigned long switch_pushed_time;
-
 bool switch_push (int pin) { // true when button pushed and released
    yield();
    if (digitalRead(pin) == 0) {
       turn_on_backlight();
       delay(DEBOUNCE);
-      unsigned long startpush = millis();
-      while (digitalRead(pin) == 0) {
-         if (digitalRead(DN_SWITCH) == 0 && digitalRead(UP_SWITCH) == 0)
-            double_button_push = true;
-         yield(); }
+      while (digitalRead(pin) == 0) yield();
       delay(DEBOUNCE);
-      switch_pushed_time = millis() - startpush;
       return true; }
    return false; }
 
@@ -404,9 +401,9 @@ void input_string(const char *title, char *dst, int length) {
             unsigned long startpush = millis();
             while (digitalRead(CHANGE_SWITCH) == 0) {
                yield();
-               if (millis() > startpush + 1000) { // after 1 sec, fast forward through characters
+               if (millis() > startpush + AUTOREPEAT_DELAY_MSEC) { // after 1 sec, fast forward through characters
                   dst[input_col] = next_glyph();
-                  delay(250); } }
+                  delay(AUTOREPEAT_PERIOD_MSEC); } }
             delay(DEBOUNCE); // top switch released
          }
          if (Serial.available() > 0) { // or get a character from the serial port instead
@@ -464,22 +461,46 @@ void do_configuration(void) { // ask for (or read from the serial port) the conf
    lcd.clear(); center_message(0, "Names recorded");
    delay(2000); }
 
-void process_scroll_buttons(void) {
-   double_button_push = false;
-   if (switch_push(UP_SWITCH) && num_calls > 0 && displayed != oldest) {
+void scroll_up(void) {
+   if (num_calls > 0 && displayed != oldest) {
       if (--displayed < 0) displayed = MAX_CALLS - 1;
       ++displayed_age;
-      display_call(displayed); }
-   if (switch_push(DN_SWITCH) && num_calls > 0 && displayed != newest) {
+      display_call(displayed); } }
+
+void scroll_dn(void) {
+   if (num_calls > 0 && displayed != newest) {
       if (++displayed >= MAX_CALLS) displayed = 0;
       --displayed_age;
-      display_call(displayed); }
-   if (double_button_push) {  // both buttons:
-      if (switch_pushed_time > 3000) // if long push, show last bad packet
-         badpacket_display();
-      else { // if short push, do configuration
-         do_configuration();
-         show_newest_call(); } } }
+      display_call(displayed); } }
+
+void double_button_push(void) {
+   unsigned long startpush = millis(); // when the second button was pushed
+   while (digitalRead(DN_SWITCH) == 0 || digitalRead(UP_SWITCH) == 0)
+      yield(); // wait for release of both
+   delay(DEBOUNCE);
+   if (millis() > startpush + LONGPUSH_MSEC) // if long push, show last bad packet
+      badpacket_display();
+   else { // if short push, do configuration
+      do_configuration();
+      show_newest_call(); } }
+
+void check_scroll(int pin, void (*scroll_rtn)(void)) {
+   if (digitalRead(pin) == 0) { // button is pushed
+      turn_on_backlight();
+      delay(DEBOUNCE);
+      unsigned long startpush = millis();
+      (*scroll_rtn)();  // do first scroll
+      while (digitalRead(pin) == 0) { // wait for it to be relesed
+         yield();
+         if (digitalRead(DN_SWITCH) == 0 && digitalRead(UP_SWITCH) == 0) {
+            double_button_push();
+            return; }
+         if (millis() > startpush + AUTOREPEAT_DELAY_MSEC) { // after 1 sec, fast forward
+            (*scroll_rtn)();
+            delay(AUTOREPEAT_PERIOD_MSEC);
+            turn_on_backlight(); } }
+      delay(DEBOUNCE); // button released
+   } }
 
 //****** routines for reading packets from the WiFi network
 
@@ -605,7 +626,8 @@ void setup(void) {
 
 void loop(void) {
 
-   process_scroll_buttons();
+   check_scroll(UP_SWITCH, scroll_up);
+   check_scroll(DN_SWITCH, scroll_dn);
 
    if (WiFi.status() != WL_CONNECTED)
       join_network();
