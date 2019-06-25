@@ -74,12 +74,14 @@
       add a mode to turn off backlight after a few seconds
    20 May 2019, V1.3, L. Shustek
       make scroll buttons work on push, not release, and implement auto-repeat
+   06 Jun 2019, V1.4, L. Shustek
+      allow decode of "Bn" type, whatever that is
 
    Programmers beware: the Feather ESP8266 has a watchdog timer that reboots the machine
    after a while (100 msec?), so every tight loop has to incorporate a call to yield().
 
  ************************************************************************************************/
-#define VERSION "1.3"
+#define VERSION "1.4"
 
 #define TESTCALLS_GOOD false     // generate some good fake calls for testing?
 #define TESTCALLS_BAD false      // generate some fake bad calls for testing?
@@ -131,7 +133,7 @@ char unitnum[7] = {0 };
 char serialnum[7] = {0 };
 char phoneline[3] = {0 };
 char duration[5] = {0 };
-char atype[2] = {0 };
+char recordtype[2] = {0 };
 char datetime[16] = {0 };
 char phonenum[16] = {0 };
 char callername[16] = {0 };
@@ -659,8 +661,8 @@ void loop(void) {
                && match("I S ")
                && copy(duration, 4)
                && (match(" G ") || match(" B "))
-               && match("A")
-               && copy(atype, 1)
+               && (match("A") || match("B"))
+               && copy(recordtype, 1)
                && match(" ")
                && copy(datetime, 15)
                && copy(phonenum, 15)
